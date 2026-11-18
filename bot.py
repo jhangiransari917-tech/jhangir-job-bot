@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 # Har nayi matching job Telegram par bhejta hai:
 # 💼 full-time + 📢 LinkedIn posts -> "UAE Jobs" group, 🕒 part-time / data entry ->
 # "Part-time / Data Entry" group, 🌍 UK/NZ/USA -> "UK NZ USA Jobs" group.
+# Indeed / Naukrigulf / GulfTalent / Bayt -> har ek ka apna group (naam mein site ka naam).
 # Koi group na mile to private chat mein bhejta hai.
 # jobs_found.csv mein save karta hai - Claude wahan se email walon ko CV bhejta hai.
 
@@ -53,6 +54,24 @@ SPONSOR_NO = ["no sponsorship", "not able to sponsor", "unable to sponsor",
               "does not sponsor", "not offer sponsorship", "without sponsorship",
               "not provide sponsorship", "sponsorship is not available",
               "sponsorship not available"]
+
+# Doosri job sites (search engine ke zariye, pichle 1 din ki listings)
+SITES = {
+    "INDEED": ("ae.indeed.com", ["accountant", '"credit controller"', '"accounts assistant"',
+                                 "bookkeeper", '"accounts receivable"', '"part time" accountant']),
+    "NAUKRI": ("naukrigulf.com", ["accountant uae", '"credit controller" uae',
+                                  '"accounts assistant" uae', "bookkeeper uae"]),
+    "GULF": ("gulftalent.com", ["accountant uae", '"credit controller" uae',
+                                '"accounts executive" uae']),
+    "BAYT": ("bayt.com", ["accountant uae", '"credit controller" uae',
+                          '"accounts assistant" uae', "bookkeeper uae"]),
+}
+SITE_JOB_PATH = {
+    "INDEED": re.compile(r"(viewjob|/rc/clk|jk=|/job/)", re.I),
+    "NAUKRI": re.compile(r"(jid-|job-listing|/jobs?-)", re.I),
+    "GULF": re.compile(r"/jobs?/.*\d{4,}", re.I),
+    "BAYT": re.compile(r"/jobs?/.*-\d{5,}", re.I),
+}
 
 # LinkedIn hiring posts (search engine se dhoonde jaate hain)
 POST_QUERIES = [
@@ -213,6 +232,55 @@ def job_details(num, abroad=False):
     return email, phone, skip
 
 
+def ddg_search(query, days="d"):
+    """DuckDuckGo se (title, link) list."""
+    out = []
+    try:
+        r = requests.get("https://html.duckduckgo.com/html/",
+                         params={"q": query, "df": days}, headers=HEADERS, timeout=30)
+    except requests.RequestException as e:
+        print(f"[Search] {e}")
+        return out
+    if r.status_code != 200:
+        print(f"[Search] {query}: status {r.status_code}")
+        return out
+    soup = BeautifulSoup(r.text, "html.parser")
+    for a in soup.select("a.result__a"):
+        href = a.get("href", "")
+        if "uddg=" in href:
+            href = unquote(parse_qs(urlparse(href).query).get("uddg", [""])[0])
+        out.append((a.get_text(" ", strip=True), href))
+    return out
+
+
+def find_site_jobs(seen):
+    jobs = []
+    for kind, (domain, queries) in SITES.items():
+        got = 0
+        for q in queries:
+            for title, link in ddg_search(f"site:{domain} {q}"):
+                if domain not in link or not SITE_JOB_PATH[kind].search(link):
+                    continue
+                jid = kind + "-" + re.sub(r"\W", "", link)[-60:]
+                if jid in seen or any(j["id"] == jid for j in jobs):
+                    continue
+                parts = [p.strip() for p in re.split(r" - | \| | – ", title) if p.strip()]
+                jt = parts[0] if parts else title
+                comp = parts[1] if len(parts) > 2 else ""
+                city = parts[2] if len(parts) > 3 else "UAE"
+                low = title.lower()
+                if own_company(title) or not title_ok(jt, "PT" if "part" in low else "FT"):
+                    continue
+                if any(x in low for x in ["saudi", "qatar", "kuwait", "oman", "bahrain", "india"]):
+                    continue
+                jobs.append({"id": jid, "kind": kind, "title": jt, "company": comp,
+                             "city": city, "link": link, "email": "", "phone": ""})
+                got += 1
+            time.sleep(3)
+        print(f"[{kind}] {got} nayi jobs")
+    return jobs
+
+
 def search_post_links(query):
     links = []
     try:
@@ -300,12 +368,21 @@ def refresh_chats(state):
             if ch.get("type") not in ("group", "supergroup", "channel"):
                 continue
             title = (ch.get("title") or "").lower()
-            if "part" in title or "data" in title:
-                chats["PT"] = str(ch["id"])
+            cid = str(ch["id"])
+            if "indeed" in title:
+                chats["INDEED"] = cid
+            elif "naukri" in title:
+                chats["NAUKRI"] = cid
+            elif "gulf" in title:
+                chats["GULF"] = cid
+            elif "bayt" in title:
+                chats["BAYT"] = cid
+            elif "part" in title or "data" in title:
+                chats["PT"] = cid
             elif any(w in title for w in ["uk", "usa", "nz", "abroad", "foreign", "bahar"]):
-                chats["ABROAD"] = str(ch["id"])
-            elif "uae" in title or "job" in title:
-                chats["FT"] = chats["POST"] = str(ch["id"])
+                chats["ABROAD"] = cid
+            elif "uae" in title or "linkedin" in title or "job" in title:
+                chats["FT"] = chats["POST"] = cid
     return chats
 
 
@@ -338,7 +415,9 @@ def append_csv(rows):
 def message(j):
     head = {"FT": "💼 Full-time", "PT": "🕒 Part-time / Online",
             "POST": "📢 LinkedIn hiring post",
-            "ABROAD": "🌍 UK / NZ / USA (visa sponsor)"}[j["kind"]]
+            "ABROAD": "🌍 UK / NZ / USA (visa sponsor)",
+            "INDEED": "🟦 Indeed", "NAUKRI": "🟧 Naukrigulf",
+            "GULF": "🟩 GulfTalent", "BAYT": "🟥 Bayt"}[j["kind"]]
     msg = (f"{head}\n<b>{html.escape(j['title'])}</b>\n"
            f"🏢 {html.escape(j['company'])}\n📍 {html.escape(j['city'])}\n")
     if j["email"]:
@@ -382,12 +461,16 @@ def main():
         keep += find_posts(seen)
     except Exception as e:
         print("[Posts] error:", e)
+    try:
+        keep += find_site_jobs(seen)
+    except Exception as e:
+        print("[Sites] error:", e)
     now = datetime.now(DUBAI).strftime("%Y-%m-%d %H:%M")
     for j in keep:
         j["found"] = now
     chats = refresh_chats(state)
     # posts aur full-time main chat mein, part-time aur UK/NZ/USA apne group mein
-    for kind in ("POST", "FT", "PT", "ABROAD"):
+    for kind in ("POST", "FT", "PT", "ABROAD", "INDEED", "NAUKRI", "GULF", "BAYT"):
         cid = chats.get(kind, chat_id)
         for j in [j for j in keep if j["kind"] == kind]:
             send(cid, message(j))
@@ -395,7 +478,8 @@ def main():
         append_csv(keep)
     else:
         print("Koi nayi job nahi mili.")
-    counts = {k: len([j for j in keep if j["kind"] == k]) for k in ("FT", "PT", "POST", "ABROAD")}
+    counts = {k: len([j for j in keep if j["kind"] == k])
+              for k in ("FT", "PT", "POST", "ABROAD", "INDEED", "NAUKRI", "GULF", "BAYT")}
     state["seen"] = list(seen) + [j["id"] for j in keep + skipped]
     save_state(state)
     print(f"Done: {counts}; {len(skipped)} skip; groups: {chats}")
