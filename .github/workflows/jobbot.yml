@@ -2,7 +2,7 @@ name: Jhangir Job Bot
 
 on:
   schedule:
-    - cron: "17 17 * * *"
+    - cron: "13 3 * * *"
   workflow_dispatch:
 
 permissions:
