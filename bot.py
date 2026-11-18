@@ -185,7 +185,8 @@ def linkedin_search(keyword, location, extra, kind, pages=2):
                 "title": title_el.get_text(strip=True),
                 "company": comp_el.get_text(strip=True) if comp_el else "",
                 "city": loc_el.get_text(strip=True) if loc_el else "",
-                "link": link,
+                # www.linkedin.com wala link iPhone par seedha LinkedIn app mein khulta hai
+                "link": (f"https://www.linkedin.com/jobs/view/{m.group(1)}/" if m else link),
             })
         time.sleep(2)
     return jobs
@@ -229,6 +230,7 @@ def search_post_links(query):
         if "uddg=" in href:
             href = unquote(parse_qs(urlparse(href).query).get("uddg", [""])[0])
         if "linkedin.com/posts/" in href:
+            href = re.sub(r"https?://[a-z]{2,3}\.linkedin\.com", "https://www.linkedin.com", href)
             links.append(href.split("?")[0])
     return links
 
