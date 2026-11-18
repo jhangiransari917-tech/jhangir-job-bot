@@ -170,16 +170,25 @@ def find_contacts(text):
     return (emails[0] if emails else ""), (phones[0] if phones else "")
 
 
-def linkedin_search(keyword, location, extra, kind, pages=2):
+def linkedin_search(keyword, location, extra, kind, pages=1):
     jobs = []
     for page in range(pages):
         url = ("https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
                f"?keywords={quote_plus(keyword)}&location={quote_plus(location)}"
                f"&f_TPR=r86400{extra}&start={page * 25}")
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=30)
-        except requests.RequestException as e:
-            print(f"[LinkedIn] {keyword}: {e}")
+        r = None
+        for attempt in range(3):
+            try:
+                r = requests.get(url, headers=HEADERS, timeout=30)
+            except requests.RequestException as e:
+                print(f"[LinkedIn] {keyword}: {e}")
+                r = None
+                break
+            if r.status_code != 429:
+                break
+            print(f"[LinkedIn] {keyword}: 429, ruk kar dobara...")
+            time.sleep(30 * (attempt + 1))
+        if r is None:
             break
         if r.status_code != 200 or not r.text.strip():
             print(f"[LinkedIn] {keyword} page {page}: status {r.status_code}")
@@ -207,7 +216,7 @@ def linkedin_search(keyword, location, extra, kind, pages=2):
                 # www.linkedin.com wala link iPhone par seedha LinkedIn app mein khulta hai
                 "link": (f"https://www.linkedin.com/jobs/view/{m.group(1)}/" if m else link),
             })
-        time.sleep(2)
+        time.sleep(5)
     return jobs
 
 
@@ -232,17 +241,42 @@ def job_details(num, abroad=False):
     return email, phone, skip
 
 
+def bing_search(query):
+    """Bing RSS se (title, link) list - GitHub par DuckDuckGo block ho jaata hai."""
+    out = []
+    try:
+        r = requests.get("https://www.bing.com/search",
+                         params={"q": query, "format": "rss", "count": "30",
+                                 "qft": 'interval="7"'},  # pichle 24 ghante
+                         headers=HEADERS, timeout=30)
+    except requests.RequestException as e:
+        print(f"[Bing] {e}")
+        return out
+    if r.status_code != 200 or "<item>" not in r.text:
+        print(f"[Bing] {query}: status {r.status_code}, items 0")
+        return out
+    for item in re.findall(r"<item>(.*?)</item>", r.text, re.S):
+        t = re.search(r"<title>(.*?)</title>", item, re.S)
+        l = re.search(r"<link>(.*?)</link>", item, re.S)
+        if t and l:
+            out.append((html.unescape(t.group(1)).strip(), html.unescape(l.group(1)).strip()))
+    return out
+
+
 def ddg_search(query, days="d"):
-    """DuckDuckGo se (title, link) list."""
+    """Pehle Bing, agar kuch na mile to DuckDuckGo."""
+    res = bing_search(query)
+    if res:
+        return res
     out = []
     try:
         r = requests.get("https://html.duckduckgo.com/html/",
                          params={"q": query, "df": days}, headers=HEADERS, timeout=30)
     except requests.RequestException as e:
-        print(f"[Search] {e}")
+        print(f"[DDG] {e}")
         return out
     if r.status_code != 200:
-        print(f"[Search] {query}: status {r.status_code}")
+        print(f"[DDG] {query}: status {r.status_code}")
         return out
     soup = BeautifulSoup(r.text, "html.parser")
     for a in soup.select("a.result__a"):
@@ -283,20 +317,7 @@ def find_site_jobs(seen):
 
 def search_post_links(query):
     links = []
-    try:
-        r = requests.get("https://html.duckduckgo.com/html/",
-                         params={"q": query, "df": "w"}, headers=HEADERS, timeout=30)
-    except requests.RequestException as e:
-        print(f"[Posts search] {e}")
-        return links
-    if r.status_code != 200:
-        print(f"[Posts search] status {r.status_code}")
-        return links
-    soup = BeautifulSoup(r.text, "html.parser")
-    for a in soup.select("a.result__a"):
-        href = a.get("href", "")
-        if "uddg=" in href:
-            href = unquote(parse_qs(urlparse(href).query).get("uddg", [""])[0])
+    for _title, href in ddg_search(query, "w"):
         if "linkedin.com/posts/" in href:
             href = re.sub(r"https?://[a-z]{2,3}\.linkedin\.com", "https://www.linkedin.com", href)
             links.append(href.split("?")[0])
@@ -445,7 +466,7 @@ def main():
     skipped, keep = [], []
     for j in found.values():
         j["email"], j["phone"], bad = job_details(j["num"])
-        time.sleep(1)
+        time.sleep(3)
         (skipped if bad else keep).append(j)
     for kw, loc in ABROAD:
         for j in linkedin_search(kw, loc, "", "ABROAD"):
@@ -455,7 +476,7 @@ def main():
                 continue
             found[j["id"]] = j
             j["email"], j["phone"], bad = job_details(j["num"], abroad=True)
-            time.sleep(1)
+            time.sleep(3)
             (skipped if bad else keep).append(j)
     try:
         keep += find_posts(seen)
