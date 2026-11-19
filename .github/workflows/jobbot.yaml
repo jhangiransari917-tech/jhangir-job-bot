@@ -1,0 +1,33 @@
+name: Jhangir Job Bot
+
+on:
+  schedule:
+    - cron: "13 3 * * *"
+  workflow_dispatch:          # "Run workflow" button se khud bhi chala saken
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Find jobs and send to Telegram
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python bot.py
+      - name: Save seen jobs
+        run: |
+          git config user.name "job-bot"
+          git config user.email "job-bot@users.noreply.github.com"
+          git add seen.json jobs_found.csv 2>/dev/null || true
+          git commit -m "Job bot update" || echo "Kuch naya nahi"
+          git push
