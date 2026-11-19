@@ -548,19 +548,51 @@ def append_csv(rows):
                         j["city"], j["email"], j["phone"], j["link"]])
 
 
+CITIES = ["Dubai", "Abu Dhabi", "Sharjah", "Ajman", "Al Ain", "Ras Al Khaimah",
+          "Fujairah", "Umm Al Quwain", "UAE", "United Arab Emirates", "Remote"]
+
+
+def tidy(j):
+    """Title / company / city ko saaf karta hai (alert emails mein sab mila hota hai)."""
+    t = " ".join(j["title"].split())
+    t = re.split(r"\s+(?:Apply now|Apply|View job|Easily apply)\b", t, flags=re.I)[0]
+    t = re.sub(r"\s*\d+\s+(?:hours?|days?|weeks?)\s+ago.*$", "", t, flags=re.I)
+    t = re.sub(r"\s*(?:Just posted|Today|Yesterday)\s*$", "", t, flags=re.I)
+    comp, city = j.get("company", ""), j.get("city", "")
+    # "Title | Company City" -> alag karo
+    if " | " in t:
+        t, rest = t.split(" | ", 1)
+        if not comp:
+            comp = rest
+    for c in CITIES:
+        m = re.search(r",?\s*" + re.escape(c) + r"(?:,\s*UAE)?\s*$", comp)
+        if m:
+            city = city or comp[m.start():].strip(" ,")
+            comp = comp[:m.start()].strip(" ,")
+            break
+    comp = re.split(r"\s+(?:Apply now|\d+\s+(?:hours?|days?)\s+ago)", comp, flags=re.I)[0]
+    j["title"], j["company"], j["city"] = t.strip(" -|·"), comp.strip(" -|·")[:70], city.strip()
+    return j
+
+
 def message(j):
+    j = tidy(j)
     head = {"FT": "💼 Full-time", "PT": "🕒 Part-time / Online",
             "POST": "📢 LinkedIn hiring post",
             "ABROAD": "🌍 UK / NZ / USA (visa sponsor)",
             "INDEED": "🟦 Indeed", "NAUKRI": "🟧 Naukrigulf",
             "GULF": "🟩 GulfTalent", "BAYT": "🟥 Bayt"}[j["kind"]]
-    msg = (f"{head}\n<b>{html.escape(j['title'])}</b>\n"
-           f"🏢 {html.escape(j['company'])}\n" + (f"📍 {html.escape(j['city'])}\n" if j['city'] else ""))
+    link = html.escape(j["link"], quote=True)
+    msg = f"{head}\n<b><a href=\"{link}\">{html.escape(j['title'][:150])}</a></b>\n"
+    if j["company"]:
+        msg += f"🏢 {html.escape(j['company'])}\n"
+    if j["city"]:
+        msg += f"📍 {html.escape(j['city'])}\n"
     if j["email"]:
         msg += f"📧 {html.escape(j['email'])} (Claude CV bhej dega)\n"
     if j["phone"]:
-        msg += f"📱 +{j['phone']} · WhatsApp: https://wa.me/{j['phone']}\n"
-    return msg + f"🔗 {j['link']}"
+        msg += f"📱 <a href=\"https://wa.me/{j['phone']}\">WhatsApp +{j['phone']}</a>\n"
+    return msg + f"👉 <a href=\"{link}\">Job kholen / Apply</a>"
 
 
 def main():
