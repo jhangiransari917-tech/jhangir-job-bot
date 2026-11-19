@@ -1,6 +1,9 @@
 import csv, html, json, os, re, sys, time
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote_plus, unquote, urlparse, parse_qs
+import email, imaplib
+from email.header import decode_header, make_header
+from datetime import date
 import requests
 from bs4 import BeautifulSoup
 
@@ -12,6 +15,8 @@ from bs4 import BeautifulSoup
 # jobs_found.csv mein save karta hai - Claude wahan se email walon ko CV bhejta hai.
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+GMAIL_USER = os.environ.get("GMAIL_USER", "").strip()
+GMAIL_PASS = os.environ.get("GMAIL_APP_PASSWORD", "").replace(" ", "").strip()
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 STATE_FILE = "seen.json"
 JOBS_CSV = "jobs_found.csv"
@@ -315,6 +320,116 @@ def find_site_jobs(seen):
     return jobs
 
 
+# ---------- Gmail job alerts (Indeed / GulfTalent / Bayt / Naukrigulf) ----------
+ALERT_SENDERS = {
+    "INDEED": ["indeed.com"],
+    "GULF": ["gulftalent.com"],
+    "BAYT": ["bayt.com"],
+    "NAUKRI": ["naukrigulf.com"],
+}
+ALERT_SKIP_SUBJ = ["we received your application", "indeed application", "current status",
+                   "update on your application", "verify", "password", "welcome"]
+BAD_LINK = ["unsubscribe", "preferences", "settings", "privacy", "terms", "help",
+            "/login", "signin", "app-store", "play.google", "apps.apple", "facebook",
+            "twitter", "linkedin.com", "instagram", "youtube", "mailto:"]
+
+
+def _subject(msg):
+    try:
+        return str(make_header(decode_header(msg.get("Subject", ""))))
+    except Exception:
+        return msg.get("Subject", "")
+
+
+def _html(msg):
+    for part in msg.walk():
+        if part.get_content_type() == "text/html":
+            try:
+                return part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", "ignore")
+            except Exception:
+                pass
+    return ""
+
+
+def gmail_alert_jobs(seen):
+    if not GMAIL_PASS or not GMAIL_USER:
+        print("[Gmail] GMAIL_USER / GMAIL_APP_PASSWORD secret nahi hai - alerts skip")
+        return []
+    jobs = []
+    try:
+        M = imaplib.IMAP4_SSL("imap.gmail.com")
+        M.login(GMAIL_USER, GMAIL_PASS)
+        M.select('"[Gmail]/All Mail"', readonly=True)
+    except Exception as e:
+        print("[Gmail] login error:", e)
+        return []
+    since = (date.today() - timedelta(days=2)).strftime("%d-%b-%Y")
+    for kind, doms in ALERT_SENDERS.items():
+        got = 0
+        for dom in doms:
+            try:
+                typ, data = M.search(None, f'(SINCE {since} FROM "{dom}")')
+            except Exception as e:
+                print(f"[Gmail] {dom}: {e}")
+                continue
+            for num in (data[0].split() if data and data[0] else [])[-40:]:
+                try:
+                    typ, md = M.fetch(num, "(RFC822)")
+                    msg = email.message_from_bytes(md[0][1])
+                except Exception:
+                    continue
+                subj = _subject(msg)
+                if any(x in subj.lower() for x in ALERT_SKIP_SUBJ):
+                    continue
+                soup = BeautifulSoup(_html(msg), "html.parser")
+                found_here = 0
+                for a in soup.find_all("a", href=True):
+                    title = " ".join(a.get_text(" ", strip=True).split())
+                    href = a["href"].strip()
+                    if not title or len(title) < 4 or len(title) > 120:
+                        continue
+                    if not href.startswith("http") or any(b in href.lower() for b in BAD_LINK):
+                        continue
+                    kindft = "PT" if "part" in title.lower() else "FT"
+                    if own_company(title) or not title_ok(title, kindft):
+                        continue
+                    # company / city: text right after the link (agar ho)
+                    nxt = a.find_parent(["td", "div", "tr"]) or a.parent
+                    extra = " ".join(nxt.get_text(" ", strip=True).split()) if nxt else ""
+                    extra = extra.replace(title, "", 1).strip(" -|·")[:90]
+                    if own_company(extra):
+                        continue
+                    jid = kind + "-" + re.sub(r"\W", "", (title + extra[:30]).lower())[:70]
+                    if jid in seen or any(j["id"] == jid for j in jobs):
+                        continue
+                    jobs.append({"id": jid, "kind": kind, "title": title, "company": extra,
+                                 "city": "", "link": href, "email": "", "phone": ""})
+                    got += 1
+                    found_here += 1
+                # Ek job wali email: "Title @ Company" subject
+                if not found_here and " @ " in subj:
+                    t, c = subj.split(" @ ", 1)
+                    kindft = "PT" if "part" in t.lower() else "FT"
+                    if not own_company(subj) and title_ok(t, kindft):
+                        link = ""
+                        for a in soup.find_all("a", href=True):
+                            h = a["href"]
+                            if h.startswith("http") and not any(b in h.lower() for b in BAD_LINK):
+                                link = h
+                                break
+                        jid = kind + "-" + re.sub(r"\W", "", subj.lower())[:70]
+                        if link and jid not in seen and not any(j["id"] == jid for j in jobs):
+                            jobs.append({"id": jid, "kind": kind, "title": t.strip(), "company": c.strip(),
+                                         "city": "", "link": link, "email": "", "phone": ""})
+                            got += 1
+        print(f"[Gmail {kind}] {got} jobs")
+    try:
+        M.logout()
+    except Exception:
+        pass
+    return jobs
+
+
 def search_post_links(query):
     links = []
     for _title, href in ddg_search(query, "w"):
@@ -440,7 +555,7 @@ def message(j):
             "INDEED": "🟦 Indeed", "NAUKRI": "🟧 Naukrigulf",
             "GULF": "🟩 GulfTalent", "BAYT": "🟥 Bayt"}[j["kind"]]
     msg = (f"{head}\n<b>{html.escape(j['title'])}</b>\n"
-           f"🏢 {html.escape(j['company'])}\n📍 {html.escape(j['city'])}\n")
+           f"🏢 {html.escape(j['company'])}\n" + (f"📍 {html.escape(j['city'])}\n" if j['city'] else ""))
     if j["email"]:
         msg += f"📧 {html.escape(j['email'])} (Claude CV bhej dega)\n"
     if j["phone"]:
@@ -486,6 +601,10 @@ def main():
         keep += find_site_jobs(seen)
     except Exception as e:
         print("[Sites] error:", e)
+    try:
+        keep += gmail_alert_jobs(seen | {j["id"] for j in keep})
+    except Exception as e:
+        print("[Gmail] error:", e)
     now = datetime.now(DUBAI).strftime("%Y-%m-%d %H:%M")
     for j in keep:
         j["found"] = now
