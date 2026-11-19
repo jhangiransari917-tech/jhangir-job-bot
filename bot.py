@@ -31,6 +31,8 @@ PT = "&f_JT=P%2CC%2CT"
 RM = "&f_WT=2"
 
 SEARCHES = [(k, UAE, "", "FT") for k in [
+    "Accountant group of companies", "Accountant holding company", "Group Accountant",
+    "Finance Officer group", "Accounts Executive head office",
     "Accountant", "Credit Controller", "Accounts Receivable", "Accounts Payable",
     "Accounts Executive", "Accounts Assistant", "Bookkeeper", "Collections Officer",
     "Billing Accountant", "VAT Accountant", "Audit Associate", "Finance Executive",
@@ -211,7 +213,11 @@ def linkedin_search(keyword, location, extra, kind, pages=1):
                 continue
             link = link_el.get("href", "").split("?")[0]
             m = re.search(r"(\d{8,})", link)
+            t_el = c.select_one("time")
+            card_txt = c.get_text(" ", strip=True).lower()
             jobs.append({
+                "posted": t_el.get_text(strip=True) if t_el else "",
+                "early": "early applicant" in card_txt,
                 "id": "li-" + (m.group(1) if m else link),
                 "num": m.group(1) if m else "",
                 "kind": kind,
@@ -226,16 +232,17 @@ def linkedin_search(keyword, location, extra, kind, pages=1):
 
 
 def job_details(num, abroad=False):
+    """Returns (email, phone, skip, description_text)."""
     if not num:
-        return "", "", True if abroad else False
+        return "", "", (True if abroad else False), ""
     try:
         r = requests.get(f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{num}",
                          headers=HEADERS, timeout=30)
         if r.status_code != 200:
-            return "", "", False
+            return "", "", False, ""
         text = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True)
     except requests.RequestException:
-        return "", "", False
+        return "", "", False, ""
     low = text.lower()
     skip = any(s in low for s in DESC_SKIP) or own_company(text[:300])
     if abroad:
@@ -243,7 +250,7 @@ def job_details(num, abroad=False):
         if "sponsor" not in low or any(n in low for n in SPONSOR_NO):
             skip = True
     email, phone = find_contacts(text)
-    return email, phone, skip
+    return email, phone, skip, text
 
 
 def bing_search(query):
@@ -522,6 +529,121 @@ def refresh_chats(state):
     return chats
 
 
+# ---------- Achi jobs pehchanna: match score, top companies, salary ----------
+TOP_COMPANIES = [
+    # Bade UAE groups
+    "emirates group", "emirates airline", "dnata", "etihad", "flydubai", "al futtaim", "majid al futtaim",
+    "maf ", "al tayer", "chalhoub", "landmark group", "lulu", "al ghurair", "al habtoor", "easa saleh al gurg",
+    "al shaya", "alshaya", "apparel group", "galadari", "al rostamani", "juma al majid", "dubai holding",
+    "emaar", "aldar", "nakheel", "meraas", "damac", "sobha", "dp world", "adnoc", "enoc", "mubadala",
+    "adq", "dubai investments", "dewa", "taqa", "e&", "etisalat", "du ", "emirates nbd", "first abu dhabi",
+    "fab ", "adcb", "mashreq", "dubai islamic", "emirates islamic", "rakbank", "noon", "talabat", "careem",
+    "jumeirah", "marriott", "hilton", "accor", "rotana", "kerzner", "atlantis", "gems education",
+    "aster", "nmc", "mediclinic", "cleveland clinic", "al jazira", "agthia", "al ain farms", "unilever",
+    "nestle", "procter", "pepsico", "coca-cola", "siemens", "schneider", "dhl", "aramex", "maersk",
+    # Insurance aur brokers (aapka field)
+    "axa", "gig ", "gulf insurance", "sukoon", "oman insurance", "orient insurance", "abu dhabi national insurance",
+    "adnic", "dubai insurance", "watania", "salama", "takaful emarat", "metlife", "allianz", "zurich", "chubb",
+    "aig", "marsh", "aon", "lockton", "howden", "willis", "wtw", "gallagher", "nexus insurance", "rsa ",
+    "qic", "union insurance", "al sagr", "national general insurance", "ngi",
+    # Audit / accounting firms
+    "deloitte", "pwc", "pricewaterhouse", "ernst & young", "ey ", "kpmg", "grant thornton", "bdo", "rsm",
+    "crowe", "mazars", "forvis", "baker tilly", "moore", "nexia", "kreston", "pkf", "mgi",
+]
+GOOD_WORDS = {  # aapke tajurbe se milte jule lafz (description mein)
+    "credit control": 8, "receivable": 6, "collection": 5, "insurance": 6, "broker": 4, "reconciliation": 4,
+    "zoho": 6, "quickbooks": 4, "vat": 4, "corporate tax": 4, "ifrs": 3, "month-end": 3, "month end": 3,
+    "petty cash": 3, "aging": 3, "ageing": 3, "audit": 3, "excel": 2, "commission": 3, "premium": 3,
+}
+SAL_RE = re.compile(r"(?:aed|dhs?|dirhams?)\s*([\d,]{4,7})(?:\s*(?:-|to|–)\s*(?:aed|dhs?)?\s*([\d,]{4,7}))?", re.I)
+YEARS_RE = re.compile(r"(\d{1,2})\s*\+?\s*(?:-\s*\d{1,2}\s*)?years?", re.I)
+APPL_RE = re.compile(r"(over\s+\d+|\d+)\s+applicants|among the first\s+(\d+)\s+applicants", re.I)
+
+
+GROUP_WORDS = [" group", "holding", "holdings", "investments", "investment llc", "enterprises",
+               "group of companies", "conglomerate", "corporation", "industries"]
+
+
+def group_company(j):
+    c = " " + (j.get("company", "") or "").lower() + " "
+    d = (j.get("desc", "") or "").lower()
+    return any(w in c for w in GROUP_WORDS) or "group of companies" in d or "diversified group" in d
+
+
+def top_company(j):
+    c = " " + (j.get("company", "") + " ").lower()
+    return any((" " + t) in c or c.strip().startswith(t.strip()) for t in TOP_COMPANIES)
+
+
+def salary_of(text):
+    m = SAL_RE.search(text or "")
+    if not m:
+        return 0, 0, ""
+    lo = int(m.group(1).replace(",", ""))
+    hi = int(m.group(2).replace(",", "")) if m.group(2) else lo
+    if lo < 1000 or lo > 100000:
+        return 0, 0, ""
+    return lo, hi, (f"AED {lo:,}" + (f" – {hi:,}" if hi != lo else ""))
+
+
+def score_job(j):
+    t = j.get("title", "").lower()
+    d = (j.get("desc", "") or "").lower()
+    pts = 40
+    if any(k in t for k in ["credit control", "receivable", "collection", "ar "]):
+        pts += 25
+    elif any(k in t for k in ["accountant", "accounts", "accounting", "bookkeep"]):
+        pts += 15
+    if any(k in t for k in ["vat", "tax", "audit", "reconciliation", "billing", "payable"]):
+        pts += 8
+    if "insurance" in t or "insurance" in j.get("company", "").lower():
+        pts += 10
+    pts += min(sum(v for k, v in GOOD_WORDS.items() if k in d), 20)
+    if top_company(j):
+        pts += 15
+    elif group_company(j):
+        pts += 10
+    if any(k in (j.get("desc", "") or "").lower() for k in ["finance department", "accounts department",
+                                                           "finance team", "accounts team", "head office"]):
+        pts += 5
+    lo, hi, _ = salary_of(d)
+    if hi >= 10000:
+        pts += 10
+    elif 0 < hi < 7000:
+        pts -= 15
+    yrs = [int(y) for y in YEARS_RE.findall(d)[:3] if y.isdigit()]
+    if yrs and min(yrs) >= 8:
+        pts -= 15
+    if j.get("early"):
+        pts += 8
+    m = APPL_RE.search(d)
+    if m and m.group(1) and "over" in m.group(1).lower():
+        pts -= 5
+    return max(5, min(pts, 100))
+
+
+def stars(p):
+    return "⭐" * max(1, min(5, round(p / 20)))
+
+
+def enrich(j):
+    j = tidy(j)
+    j["score"] = score_job(j)
+    j["top"] = top_company(j)
+    j["group"] = (not j["top"]) and group_company(j)
+    j["salary"] = salary_of(j.get("desc", ""))[2]
+    m = APPL_RE.search(j.get("desc", "") or "")
+    j["applicants"] = ""
+    if m:
+        j["applicants"] = (f"Pehle {m.group(2)} applicants mein" if m.group(2)
+                           else f"{m.group(1)} applicants")
+    return j
+
+
+def norm_key(j):
+    return re.sub(r"\W", "", (j.get("title", "") + j.get("company", "")).lower())[:60]
+
+
 def tg(method, **params):
     r = requests.post(f"https://api.telegram.org/bot{TOKEN}/{method}",
                       data=params, timeout=30)
@@ -611,16 +733,56 @@ def message(j):
             "INDEED": "🟦 Indeed", "NAUKRI": "🟧 Naukrigulf",
             "GULF": "🟩 GulfTalent", "BAYT": "🟥 Bayt"}[j["kind"]]
     link = html.escape(j["link"], quote=True)
-    msg = f"{head}\n<b><a href=\"{link}\">{html.escape(j['title'][:150])}</a></b>\n"
+    msg = f"{head}  {stars(j.get('score', 40))}\n<b><a href=\"{link}\">{html.escape(j['title'][:150])}</a></b>\n"
     if j["company"]:
         msg += f"🏢 {html.escape(j['company'])}\n"
     if j["city"]:
         msg += f"📍 {html.escape(j['city'])}\n"
+    tags = []
+    if j.get("top"):
+        tags.append("🏆 Top company")
+    elif j.get("group"):
+        tags.append("🏢 Group of companies")
+    if j.get("salary"):
+        tags.append(f"💰 {j['salary']}")
+    if j.get("early"):
+        tags.append("🔥 Jaldi apply karen")
+    elif j.get("applicants"):
+        tags.append(f"👥 {j['applicants']}")
+    if j.get("posted"):
+        tags.append(f"⏱ {j['posted']}")
+    if tags:
+        msg += " · ".join(html.escape(x) for x in tags) + "\n"
     if j["email"]:
         msg += f"📧 {html.escape(j['email'])} (Claude CV bhej dega)\n"
     if j["phone"]:
         msg += f"📱 <a href=\"https://wa.me/{j['phone']}\">WhatsApp +{j['phone']}</a>\n"
     return msg + f"👉 <a href=\"{link}\">Job kholen / Apply</a>"
+
+GROUP_NAME = {"FT": "Linkedin Jobs", "POST": "Linkedin Jobs", "PT": "Data Entry",
+              "ABROAD": "UK NZ USA Jobs", "INDEED": "Indeed Jobs", "NAUKRI": "Naukrigulf Jobs",
+              "GULF": "GulfTalent Jobs", "BAYT": "Bayt Jobs"}
+
+
+def send_digest(chat_id, keep):
+    """Private chat mein roz ek summary: aaj ki sab se achi 10 jobs + har group ki ginti."""
+    best = [j for j in keep if j["kind"] not in ("PT",)][:10]
+    lines = [f"🌅 <b>Aaj ki job report</b> — {len(keep)} nayi jobs\n"]
+    counts = {}
+    for j in keep:
+        counts[GROUP_NAME[j["kind"]]] = counts.get(GROUP_NAME[j["kind"]], 0) + 1
+    lines.append(" · ".join(f"{k}: {v}" for k, v in counts.items()) + "\n")
+    if best:
+        lines.append("🏅 <b>Sab se behtar matches (pehle inhein apply karen):</b>")
+        for i, j in enumerate(best, 1):
+            j = tidy(j)
+            link = html.escape(app_link(j["link"]), quote=True)
+            extra = " 🏆" if j.get("top") else (" 🏢 Group" if j.get("group") else "")
+            extra += f" 💰{j['salary']}" if j.get("salary") else ""
+            lines.append(f"{i}. {stars(j['score'])} <a href=\"{link}\">{html.escape(j['title'][:80])}</a>"
+                         f" — {html.escape(j['company'][:40])}{html.escape(extra)}")
+    lines.append("\nBaqi sab jobs apne apne group mein hain 👆")
+    send(chat_id, "\n".join(lines))
 
 
 def main():
@@ -640,7 +802,7 @@ def main():
                 found[j["id"]] = j
     skipped, keep = [], []
     for j in found.values():
-        j["email"], j["phone"], bad = job_details(j["num"])
+        j["email"], j["phone"], bad, j["desc"] = job_details(j["num"])
         time.sleep(3)
         (skipped if bad else keep).append(j)
     for kw, loc in ABROAD:
@@ -650,7 +812,7 @@ def main():
             if not title_ok(j["title"], "FT"):
                 continue
             found[j["id"]] = j
-            j["email"], j["phone"], bad = job_details(j["num"], abroad=True)
+            j["email"], j["phone"], bad, j["desc"] = job_details(j["num"], abroad=True)
             time.sleep(3)
             (skipped if bad else keep).append(j)
     try:
@@ -666,6 +828,18 @@ def main():
     except Exception as e:
         print("[Gmail] error:", e)
     now = datetime.now(DUBAI).strftime("%Y-%m-%d %H:%M")
+    uniq, keys = [], set()
+    for j in keep:
+        j.setdefault("desc", "")
+        j.setdefault("email", "")
+        j.setdefault("phone", "")
+        k = norm_key(j)
+        if k in keys:
+            skipped.append(j)
+            continue
+        keys.add(k)
+        uniq.append(enrich(j))
+    keep = sorted(uniq, key=lambda x: -x["score"])
     for j in keep:
         j["found"] = now
     chats = refresh_chats(state)
@@ -675,6 +849,7 @@ def main():
         for j in [j for j in keep if j["kind"] == kind]:
             send(cid, message(j))
     if keep:
+        send_digest(chat_id, keep)
         append_csv(keep)
     else:
         print("Koi nayi job nahi mili.")
