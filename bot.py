@@ -575,8 +575,36 @@ def tidy(j):
     return j
 
 
+def app_link(url):
+    """Tracking/redirect link ko site ke seedhe job link mein badalta hai,
+    taake iPhone usay site ki app mein khole (universal link)."""
+    try:
+        u = url
+        if not any(d in urlparse(u).netloc for d in ["linkedin.com", "gulftalent.com", "bayt.com",
+                                                      "naukrigulf.com"]) or "indeed" in u:
+            r = requests.get(u, headers=HEADERS, timeout=15, allow_redirects=True, stream=True)
+            u = r.url or u
+            r.close()
+        p = urlparse(u)
+        q = parse_qs(p.query)
+        if "indeed" in p.netloc:
+            jk = (q.get("jk") or q.get("vjk") or [""])[0]
+            if not jk:
+                m = re.search(r"jk=([0-9a-f]{10,})", url + u)
+                jk = m.group(1) if m else ""
+            if jk:
+                return f"https://ae.indeed.com/viewjob?jk={jk}"
+            return u
+        if any(d in p.netloc for d in ["gulftalent.com", "bayt.com", "naukrigulf.com", "linkedin.com"]):
+            return f"https://{p.netloc}{p.path}"
+        return u
+    except Exception:
+        return url
+
+
 def message(j):
     j = tidy(j)
+    j["link"] = app_link(j["link"])
     head = {"FT": "💼 Full-time", "PT": "🕒 Part-time / Online",
             "POST": "📢 LinkedIn hiring post",
             "ABROAD": "🌍 UK / NZ / USA (visa sponsor)",
