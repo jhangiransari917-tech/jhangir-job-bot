@@ -437,6 +437,116 @@ def gmail_alert_jobs(seen):
     return jobs
 
 
+# ---------- Bayt aur Naukrigulf: seedhi search (bina alert ke) ----------
+DIRECT_KEYWORDS = ["accountant", "credit-controller", "accounts-receivable", "accounts-assistant",
+                   "accounts-executive", "accounts-payable", "finance-executive", "bookkeeper",
+                   "vat-accountant", "audit-associate"]
+BROWSER_HEADERS = dict(HEADERS, **{
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9", "Cache-Control": "no-cache",
+})
+
+
+def _slug_title(slug):
+    slug = re.sub(r"-(?:jobs?|jid|n-cd|in|at)-.*$", "", slug)
+    return " ".join(w.capitalize() for w in slug.split("-") if w)[:100]
+
+
+def bayt_jobs(seen):
+    jobs = []
+    for kw in DIRECT_KEYWORDS:
+        url = f"https://www.bayt.com/en/uae/jobs/{kw}-jobs/?filters%5Bjb_last_modification_date_interval%5D%5B%5D=3"
+        try:
+            r = requests.get(url, headers=BROWSER_HEADERS, timeout=30)
+        except requests.RequestException as e:
+            print(f"[Bayt] {kw}: {e}")
+            continue
+        if r.status_code != 200:
+            print(f"[Bayt] {kw}: status {r.status_code}")
+            if r.status_code in (403, 429, 503):
+                break
+            continue
+        soup = BeautifulSoup(r.text, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            m = re.search(r"/en/[a-z-]+/jobs/([a-z0-9-]+?)-(\d{6,})/?$", href.split("?")[0])
+            if not m:
+                continue
+            link = "https://www.bayt.com" + href.split("?")[0] if href.startswith("/") else href.split("?")[0]
+            jid = "BAYT-" + m.group(2)
+            if jid in seen or any(j["id"] == jid for j in jobs):
+                continue
+            title = " ".join(a.get_text(" ", strip=True).split()) or _slug_title(m.group(1))
+            box = a.find_parent(["li", "div", "article"])
+            comp = ""
+            if box:
+                c_el = box.select_one("[class*=company], .jb-company, b.p10r, a[href*='/company/']")
+                comp = c_el.get_text(" ", strip=True) if c_el else ""
+            loc = ""
+            if box:
+                l_el = box.select_one("[class*=loc], .jb-loc")
+                loc = l_el.get_text(" ", strip=True) if l_el else ""
+            kindft = "PT" if "part" in title.lower() else "FT"
+            if len(title) < 4 or own_company(title + " " + comp) or not title_ok(title, kindft):
+                continue
+            jobs.append({"id": jid, "kind": "BAYT", "title": title, "company": comp[:70],
+                         "city": loc[:40], "link": link, "email": "", "phone": ""})
+        time.sleep(4)
+    print(f"[Bayt] {len(jobs)} nayi jobs")
+    return jobs
+
+
+def naukri_jobs(seen):
+    jobs = []
+    for kw in DIRECT_KEYWORDS:
+        url = f"https://www.naukrigulf.com/{kw}-jobs-in-uae?sort=1"
+        try:
+            r = requests.get(url, headers=BROWSER_HEADERS, timeout=30)
+        except requests.RequestException as e:
+            print(f"[Naukrigulf] {kw}: {e}")
+            continue
+        if r.status_code != 200:
+            print(f"[Naukrigulf] {kw}: status {r.status_code}")
+            if r.status_code in (403, 429, 503):
+                break
+            continue
+        html_txt = r.text.replace("\\/", "/")
+        found = set(re.findall(r'(https?://www\.naukrigulf\.com/[a-z0-9-]+-jid-\d+|/[a-z0-9-]+-jid-\d+)', html_txt))
+        soup = BeautifulSoup(r.text, "html.parser")
+        texts = {}
+        for a in soup.find_all("a", href=True):
+            if "-jid-" in a["href"]:
+                texts[a["href"].split("?")[0]] = " ".join(a.get_text(" ", strip=True).split())
+        for u in found:
+            path = u.replace("https://www.naukrigulf.com", "")
+            link = "https://www.naukrigulf.com" + path
+            num = re.search(r"jid-(\d+)", path).group(1)
+            jid = "NAUKRI-" + num
+            if jid in seen or any(j["id"] == jid for j in jobs):
+                continue
+            slug = path.strip("/")
+            title = texts.get(path) or texts.get(link) or _slug_title(slug)
+            title = title.split("  ")[0][:100]
+            comp = ""
+            mc = re.search(r"-in-([a-z0-9-]+?)-\d+-to-\d+-years", slug)
+            if mc:
+                part = mc.group(1).split("-uae-in-")[-1].split("-in-")[-1]
+                comp = " ".join(w.capitalize() for w in part.split("-"))
+            city = ""
+            for c in ["dubai", "abu-dhabi", "sharjah", "ajman", "al-ain"]:
+                if c in slug:
+                    city = c.replace("-", " ").title()
+                    break
+            kindft = "PT" if "part" in title.lower() else "FT"
+            if own_company(title + " " + comp) or not title_ok(title, kindft):
+                continue
+            jobs.append({"id": jid, "kind": "NAUKRI", "title": title, "company": comp[:70],
+                         "city": city, "link": link, "email": "", "phone": ""})
+        time.sleep(4)
+    print(f"[Naukrigulf] {len(jobs)} nayi jobs")
+    return jobs
+
+
 def search_post_links(query):
     links = []
     for _title, href in ddg_search(query, "w"):
@@ -765,24 +875,32 @@ GROUP_NAME = {"FT": "Linkedin Jobs", "POST": "Linkedin Jobs", "PT": "Data Entry"
 
 
 def send_digest(chat_id, keep):
-    """Private chat mein roz ek summary: aaj ki sab se achi 10 jobs + har group ki ginti."""
-    best = [j for j in keep if j["kind"] not in ("PT",)][:10]
-    lines = [f"🌅 <b>Aaj ki job report</b> — {len(keep)} nayi jobs\n"]
+    """Private chat mein roz poori report: har nayi related job (best pehle), group ke hisaab se."""
     counts = {}
     for j in keep:
         counts[GROUP_NAME[j["kind"]]] = counts.get(GROUP_NAME[j["kind"]], 0) + 1
-    lines.append(" · ".join(f"{k}: {v}" for k, v in counts.items()) + "\n")
-    if best:
-        lines.append("🏅 <b>Sab se behtar matches (pehle inhein apply karen):</b>")
-        for i, j in enumerate(best, 1):
-            j = tidy(j)
-            link = html.escape(app_link(j["link"]), quote=True)
-            extra = " 🏆" if j.get("top") else (" 🏢 Group" if j.get("group") else "")
-            extra += f" 💰{j['salary']}" if j.get("salary") else ""
-            lines.append(f"{i}. {stars(j['score'])} <a href=\"{link}\">{html.escape(j['title'][:80])}</a>"
-                         f" — {html.escape(j['company'][:40])}{html.escape(extra)}")
-    lines.append("\nBaqi sab jobs apne apne group mein hain 👆")
-    send(chat_id, "\n".join(lines))
+    head = (f"🌅 <b>Aaj ki job report</b> — {len(keep)} nayi jobs\n"
+            + " · ".join(f"{k}: {v}" for k, v in counts.items())
+            + "\n\n🏅 <b>Sab jobs (best pehle):</b>")
+    lines, n = [], 0
+    for j in keep:
+        n += 1
+        j = tidy(j)
+        link = html.escape(app_link(j["link"]), quote=True)
+        tag = " 🏆" if j.get("top") else (" 🏢" if j.get("group") else "")
+        tag += f" 💰{j['salary']}" if j.get("salary") else ""
+        src = {"FT": "LinkedIn", "POST": "Post", "PT": "Part-time", "ABROAD": "UK/NZ/USA",
+               "INDEED": "Indeed", "NAUKRI": "Naukrigulf", "GULF": "GulfTalent", "BAYT": "Bayt"}[j["kind"]]
+        lines.append(f"{n}. {stars(j['score'])} <a href=\"{link}\">{html.escape(j['title'][:80])}</a>"
+                     f" — {html.escape(j['company'][:40])} [{src}]{html.escape(tag)}")
+    # Telegram ki ek message ki had ~4000 harf; zarurat ho to kai messages
+    msg = head
+    for ln in lines:
+        if len(msg) + len(ln) + 1 > 3800:
+            send(chat_id, msg)
+            msg = "(jari)"
+        msg += "\n" + ln
+    send(chat_id, msg)
 
 
 def main():
@@ -823,6 +941,11 @@ def main():
         keep += find_site_jobs(seen)
     except Exception as e:
         print("[Sites] error:", e)
+    for fn in (bayt_jobs, naukri_jobs):
+        try:
+            keep += fn(seen | {j["id"] for j in keep})
+        except Exception as e:
+            print(f"[{fn.__name__}] error:", e)
     try:
         keep += gmail_alert_jobs(seen | {j["id"] for j in keep})
     except Exception as e:
